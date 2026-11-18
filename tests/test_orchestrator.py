@@ -97,6 +97,40 @@ class OrchestratorTest(unittest.TestCase):
         finally:
             service.close()
 
+    def test_retry_failed_worker_reuses_original_input(self):
+        jobs = []
+        attachment = self.root / "报价.txt"
+        attachment.write_text("B 家报价 950 元", encoding="utf-8")
+
+        def route(event, tasks):
+            return [{"action": "new", "title": "比价", "goal": "对比报价"}]
+
+        def execute(job):
+            jobs.append(job)
+            if len(jobs) == 1:
+                raise RuntimeError("执行器暂时不可用")
+            return {"status": "ready", "summary": "已比较报价"}
+
+        service = Orchestrator(self.state, route, execute)
+        service.start()
+        try:
+            event_id = service.submit("请对比报价", files=[attachment])
+            failed = self.wait_for(lambda: self.task(service, "比价", "failed"))
+            with self.assertRaisesRegex(ValueError, "找不到"):
+                service.retry("missing")
+            service.retry(failed["id"])
+            result = self.wait_for(lambda: self.task(service, "比价", "ready"))
+            self.assertEqual(result["id"], failed["id"])
+            self.assertEqual(len(jobs), 2)
+            self.assertEqual(jobs[0]["inputs"], jobs[1]["inputs"])
+            user_ids = [message["id"] for message in service.snapshot()["messages"]
+                        if message["role"] == "user"]
+            self.assertEqual(user_ids, [event_id])
+            with self.assertRaisesRegex(ValueError, "只有失败"):
+                service.retry(result["id"])
+        finally:
+            service.close()
+
     def test_interrupted_claim_reuses_durable_input(self):
         def route(event, tasks):
             return [{"action": "new", "title": "比价", "goal": "比价"}]

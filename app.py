@@ -20,6 +20,7 @@ MAX_ATTACHMENTS = 12
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 MAX_REQUEST_BYTES = (MAX_UPLOAD_BYTES * 4 // 3) + 256 * 1024
 DOWNLOAD = re.compile(r"^/api/tasks/([a-fA-F0-9-]{8,64})/files/(.+)$")
+TASK_ACTION = re.compile(r"^/api/tasks/([a-fA-F0-9-]{8,64})/(activity|retry)$")
 
 
 class RequestError(ValueError):
@@ -28,7 +29,7 @@ class RequestError(ValueError):
         self.status = status
 
 
-def build_server(orchestrator, inbox, state_dir, port):
+def build_server(orchestrator, inbox, state_dir, port, activity=None):
     state_dir = Path(state_dir).resolve()
 
     class Handler(BaseHTTPRequestHandler):
@@ -43,6 +44,13 @@ def build_server(orchestrator, inbox, state_dir, port):
                     self._json(HTTPStatus.OK, orchestrator.snapshot())
                 elif path == "/api/config":
                     self._json(HTTPStatus.OK, {"inbox": str(inbox.root), "folders": inbox.folders()})
+                elif path == "/api/policies":
+                    self._json(HTTPStatus.OK, {"policies": orchestrator.policies()})
+                elif (match := TASK_ACTION.fullmatch(path)) and match.group(2) == "activity":
+                    task_id = match.group(1)
+                    if not self._task(task_id):
+                        raise RequestError("找不到这项任务", HTTPStatus.NOT_FOUND)
+                    self._json(HTTPStatus.OK, {"activity": activity.read(task_id) if activity else []})
                 elif match := DOWNLOAD.fullmatch(path):
                     task_id, name = match.groups()
                     self._download(task_id, unquote(name))
@@ -56,9 +64,24 @@ def build_server(orchestrator, inbox, state_dir, port):
         def do_POST(self):
             try:
                 self._check_same_origin()
-                if urlsplit(self.path).path != "/api/messages":
+                path = urlsplit(self.path).path
+                if path == "/api/messages":
+                    self._json(HTTPStatus.ACCEPTED, {"event_id": self._submit(self._read_json())})
+                elif path == "/api/policies":
+                    config = self._read_json()
+                    goal = config.get("goal")
+                    if not isinstance(goal, str) or len(goal) > 4000:
+                        raise RequestError("授权目标最多 4,000 字符")
+                    policy = orchestrator.save_policy(config.get("source"), goal, config.get("mode"))
+                    self._json(HTTPStatus.OK, {"policy": policy})
+                elif path == "/api/events":
+                    self._json(HTTPStatus.ACCEPTED, {"event_id": self._external(self._read_json())})
+                elif (match := TASK_ACTION.fullmatch(path)) and match.group(2) == "retry":
+                    self._read_json()
+                    orchestrator.retry(match.group(1))
+                    self._json(HTTPStatus.ACCEPTED, {"task_id": match.group(1)})
+                else:
                     raise RequestError("找不到该操作", HTTPStatus.NOT_FOUND)
-                self._json(HTTPStatus.ACCEPTED, {"event_id": self._submit(self._read_json())})
             except RequestError as exc:
                 self._json(exc.status, {"error": str(exc)})
             except ValueError as exc:
@@ -100,8 +123,7 @@ def build_server(orchestrator, inbox, state_dir, port):
             reply_to = data.get("reply_to")
             attachments = data.get("attachments", [])
             request_id = data.get("request_id")
-            if not isinstance(text, str) or len(text) > 16000:
-                raise RequestError("消息最多 16,000 字符")
+            text = self._text(text)
             if watch is not None and (not isinstance(watch, str) or not watch):
                 raise RequestError("请选择一个收件目录")
             if reply_to is not None and (not isinstance(reply_to, str) or not reply_to):
@@ -110,13 +132,39 @@ def build_server(orchestrator, inbox, state_dir, port):
                 r"[a-zA-Z0-9-]{8,64}", request_id
             )):
                 raise RequestError("消息编号无效")
-            if not isinstance(attachments, list) or len(attachments) > MAX_ATTACHMENTS:
-                raise RequestError("每条消息最多附上 12 个文件")
-            if not text.strip() and not attachments:
+            if not text and not attachments:
                 raise RequestError("请输入任务要求或附上文件")
-            if reply_to and not any(task["id"] == reply_to for task in orchestrator.snapshot()["tasks"]):
+            if reply_to and not self._task(reply_to):
                 raise RequestError("回复对应的任务已不存在", HTTPStatus.NOT_FOUND)
             watched_dir = inbox.prepare_watch(watch) if watch else None
+            files = self._attachments(attachments)
+            if watched_dir:
+                files.extend(inbox.include_existing(watched_dir))
+            message = text or "已补充附件，请查看。"
+            return orchestrator.submit(message, files=files, reply_to=reply_to, watch=watched_dir,
+                                       source_id=request_id)
+
+        def _external(self, data):
+            source, source_id, thread = (data.get(key) for key in ("source", "source_id", "thread"))
+            if not all(isinstance(value, str) and value.strip() for value in (source, source_id, thread)):
+                raise RequestError("需要来源 ID、事件 ID 和消息串 ID")
+            text = self._text(data.get("text", ""))
+            attachments = data.get("attachments", [])
+            if not text and not attachments:
+                raise RequestError("请输入事件内容或附上文件")
+            return orchestrator.submit_external(source.strip(), source_id.strip(), thread.strip(),
+                                                text or "收到附件。", self._attachments(attachments))
+
+        @staticmethod
+        def _text(value):
+            if not isinstance(value, str) or len(value) > 16000:
+                raise RequestError("消息最多 16,000 字符")
+            return value.strip()
+
+        @staticmethod
+        def _attachments(attachments):
+            if not isinstance(attachments, list) or len(attachments) > MAX_ATTACHMENTS:
+                raise RequestError("每条消息最多附上 12 个文件")
             decoded = []
             uploaded_bytes = 0
             for attachment in attachments:
@@ -133,15 +181,14 @@ def build_server(orchestrator, inbox, state_dir, port):
                 if uploaded_bytes > MAX_UPLOAD_BYTES:
                     raise RequestError("附件合计最多 15 MB", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
                 decoded.append((name, payload))
-            files = [inbox.store_upload(name, payload) for name, payload in decoded]
-            if watched_dir:
-                files.extend(inbox.include_existing(watched_dir))
-            message = text.strip() or "已补充附件，请查看。"
-            return orchestrator.submit(message, files=files, reply_to=reply_to, watch=watched_dir,
-                                       source_id=request_id)
+            return [inbox.store_upload(name, payload) for name, payload in decoded]
+
+        @staticmethod
+        def _task(task_id):
+            return next((item for item in orchestrator.snapshot()["tasks"] if item["id"] == task_id), None)
 
         def _download(self, task_id, name):
-            task = next((item for item in orchestrator.snapshot()["tasks"] if item["id"] == task_id), None)
+            task = self._task(task_id)
             if not task or name not in task["files"]:
                 raise RequestError("找不到这个交付文件", HTTPStatus.NOT_FOUND)
             path = Path(name)
@@ -190,6 +237,7 @@ def build_server(orchestrator, inbox, state_dir, port):
 
 
 def main():
+    from activity import ActivityLog
     from executor import CodexAgent
     from inbox import Inbox
     from orchestrator import Orchestrator
@@ -201,13 +249,14 @@ def main():
     parser.add_argument("--slots", type=int, default=2, choices=range(1, 9), metavar="1–8")
     args = parser.parse_args()
     state_dir = args.state_dir.resolve()
-    agent = CodexAgent()
+    activity = ActivityLog(state_dir)
+    agent = CodexAgent(on_activity=activity.record)
     orchestrator = Orchestrator(state_dir, agent.assess, agent.execute, slots=args.slots)
     inbox = Inbox(
         args.inbox.resolve(), state_dir, orchestrator.submit,
         subscriptions=orchestrator.watch_directories
     )
-    with build_server(orchestrator, inbox, state_dir, args.port) as server:
+    with build_server(orchestrator, inbox, state_dir, args.port, activity=activity) as server:
         try:
             orchestrator.start()
             inbox.start()

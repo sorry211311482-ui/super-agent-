@@ -12,6 +12,10 @@
   <div class="layout">
     <header class="topbar">
       <a class="brand" href="/" aria-label="SuperAgent 工作区"><span class="brand-mark" aria-hidden="true">S</span>SuperAgent</a>
+      <nav class="views" aria-label="工作区界面">
+        <button type="button" class="view-button" id="workspace-view" aria-pressed="true">工作台</button>
+        <button type="button" class="view-button" id="sources-view" aria-pressed="false">来源与事件</button>
+      </nav>
       <div class="connection" id="connection" role="status"><span></span>正在连接</div>
     </header>
     <main class="conversation" aria-labelledby="chat-heading">
@@ -72,6 +76,68 @@
         </div>
       </div>
     </aside>
+    <section class="sources" id="sources-panel" aria-label="来源与事件" hidden>
+      <div class="source-grid">
+        <section class="source-card" aria-labelledby="policy-title">
+          <header class="panel-head"><h2 id="policy-title">来源规则</h2></header>
+          <div class="source-body">
+            <form class="source-form" id="policy-form">
+              <label class="field">来源 ID
+                <input id="policy-source" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}" autocomplete="off">
+              </label>
+              <p class="field-hint">可用英文字母、数字、下划线、连字符和点。</p>
+              <label class="field">授权目标
+                <textarea id="policy-goal" rows="3" required maxlength="4000" placeholder="描述允许 Agent 自主处理的情况及范围"></textarea>
+              </label>
+              <label class="field">接单方式
+                <select id="policy-mode">
+                  <option value="off">关闭</option>
+                  <option value="observe">观察</option>
+                  <option value="auto">自动</option>
+                </select>
+              </label>
+              <p class="field-hint" id="policy-hint"></p>
+              <div class="source-actions">
+                <button type="submit" class="button primary" id="save-policy">保存规则</button>
+              </div>
+              <p class="source-feedback" id="policy-feedback" role="status" hidden></p>
+            </form>
+            <div class="policy-list" id="policy-list"></div>
+          </div>
+        </section>
+        <section class="source-card" aria-labelledby="event-title">
+          <header class="panel-head"><h2 id="event-title">提交事件</h2></header>
+          <div class="source-body">
+            <form class="source-form" id="event-form">
+              <label class="field">来源
+                <select required id="event-source"><option value="">请选择来源</option></select>
+              </label>
+              <label class="field">消息串 ID
+                <input id="event-thread" required maxlength="256" autocomplete="off">
+              </label>
+              <p class="field-hint">同一消息串的补充事件沿用这个 ID。</p>
+              <label class="field">事件内容
+                <textarea id="event-text" rows="3" maxlength="16000"></textarea>
+              </label>
+              <label class="field">附件
+                <input type="file" id="event-files" multiple>
+              </label>
+              <div class="source-actions">
+                <button type="submit" class="button primary" id="send-event">提交事件</button>
+              </div>
+              <p class="source-feedback" id="event-feedback" role="status" hidden></p>
+            </form>
+          </div>
+        </section>
+        <section class="source-card event-card" aria-labelledby="recent-title">
+          <header class="panel-head"><h2 id="recent-title">最近事件</h2></header>
+          <div class="source-body">
+            <ol class="event-log" id="event-log"></ol>
+            <p class="empty" id="empty-events">事件到达后，可以在这里查看路由决定。</p>
+          </div>
+        </section>
+      </div>
+    </section>
   </div>
 </body>
 </html>

@@ -2,6 +2,7 @@
 
 import fcntl
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -81,10 +82,35 @@ class Orchestrator:
                 message_id TEXT PRIMARY KEY REFERENCES messages(id),
                 event_id TEXT NOT NULL REFERENCES events(id)
             );
+            CREATE TABLE IF NOT EXISTS source_policies (
+                source TEXT PRIMARY KEY,
+                goal TEXT NOT NULL,
+                mode TEXT NOT NULL CHECK(mode IN ('off', 'observe', 'auto')),
+                version INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS external_events (
+                event_id TEXT PRIMARY KEY REFERENCES events(id),
+                decision TEXT NOT NULL DEFAULT 'pending',
+                task_id TEXT REFERENCES tasks(id),
+                allow_auto INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS external_threads (
+                source TEXT NOT NULL REFERENCES source_policies(source),
+                thread TEXT NOT NULL,
+                task_id TEXT NOT NULL REFERENCES tasks(id),
+                PRIMARY KEY(source, thread)
+            );
             CREATE INDEX IF NOT EXISTS pending_events ON events(seq) WHERE routed = 0;
             CREATE INDEX IF NOT EXISTS pending_deliveries ON deliveries(task_id) WHERE done = 0;
             CREATE INDEX IF NOT EXISTS subscriptions_by_thread ON subscriptions(thread);
         """)
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in self.db.execute("PRAGMA table_info(external_events)")}
+            if "allow_auto" not in columns:
+                self.db.execute(
+                    "ALTER TABLE external_events ADD COLUMN allow_auto INTEGER NOT NULL DEFAULT 0"
+                )
 
     def start(self):
         with self.changed:
@@ -166,14 +192,142 @@ class Orchestrator:
                                (thread,))
         return [row["task_id"] for row in rows]
 
+    @staticmethod
+    def _external_source(source):
+        normalized = source.strip().lower() if isinstance(source, str) else ""
+        if (not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,63}", normalized)
+                or normalized in ("chat", "directory")):
+            raise ValueError("外部来源名称无效")
+        return normalized
+
+    def policies(self):
+        with self.changed:
+            rows = self.db.execute("SELECT source, goal, mode FROM source_policies ORDER BY source")
+            return [dict(row) for row in rows]
+
+    def _policy(self, source):
+        row = self.db.execute(
+            "SELECT source, goal, mode, version FROM source_policies WHERE source = ?", (source,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def save_policy(self, source, goal, mode):
+        source = self._external_source(source)
+        goal = self._nonempty({"goal": goal}, "goal")
+        if mode not in ("off", "observe", "auto"):
+            raise ValueError("规则模式必须为 off、observe 或 auto")
+        with self.changed, self.db:
+            if self.stopping:
+                raise RuntimeError("服务已经关闭")
+            self.db.execute("""
+                INSERT INTO source_policies (source, goal, mode) VALUES (?, ?, ?)
+                ON CONFLICT(source) DO UPDATE SET goal = excluded.goal, mode = excluded.mode,
+                    version = source_policies.version + 1
+                WHERE source_policies.goal != excluded.goal OR source_policies.mode != excluded.mode
+            """, (source, goal, mode))
+        return {"source": source, "goal": goal, "mode": mode}
+
+    def submit_external(self, source, source_id, thread, text, files=()):
+        source = self._external_source(source)
+        source_id = self._nonempty({"source_id": source_id}, "source_id")
+        thread = self._nonempty({"thread": thread}, "thread")
+        if len(source_id) > 256 or len(thread) > 256:
+            raise ValueError("来源事件编号和消息串最多 256 个字符")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("消息正文不能为空")
+        event_id = uuid.uuid4().hex
+        paths = [str(Path(path).expanduser().resolve()) for path in files]
+        with self.changed, self.db:
+            if self.stopping:
+                raise RuntimeError("服务已经关闭")
+            existing = self.db.execute(
+                "SELECT id FROM events WHERE source = ? AND source_id = ?", (source, source_id)
+            ).fetchone()
+            if existing:
+                return existing["id"]
+            self.db.execute("""
+                INSERT INTO events (id, source, source_id, thread, text, files)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (event_id, source, source_id, thread, text, json.dumps(paths)))
+            policy = self._policy(source)
+            allow_auto = bool(policy and policy["mode"] == "auto")
+            self.db.execute("INSERT INTO external_events (event_id, allow_auto) VALUES (?, ?)",
+                            (event_id, allow_auto))
+            self._prepare_external({
+                "id": event_id, "source": source, "thread": thread, "text": text, "files": paths,
+            }, allow_auto)
+            self.changed.notify_all()
+        return event_id
+
+    def _finish_external(self, event_id, decision, task_id=None):
+        self.db.execute("UPDATE external_events SET decision = ?, task_id = ? WHERE event_id = ?",
+                        (decision, task_id, event_id))
+        self.db.execute("UPDATE events SET routed = 1 WHERE id = ?", (event_id,))
+
+    def _deliver_external(self, event, task_id, decision):
+        self._deliver(task_id, event["id"], event["text"], None)
+        self._post("user", event["text"], task_id, [Path(path).name for path in event["files"]],
+                   source=event["source"], message_id=event["id"])
+        self._finish_external(event["id"], decision, task_id)
+
+    def _prepare_external(self, event, allow_auto):
+        """Apply the programmatic gate and subscription before using the Router."""
+        policy = self._policy(event["source"])
+        if not policy or policy["mode"] == "off":
+            self._finish_external(event["id"], "ignored")
+            return None
+        if policy["mode"] == "auto" and allow_auto:
+            target = self.db.execute("""
+                SELECT task.id FROM external_threads AS thread
+                JOIN tasks AS task ON task.id = thread.task_id
+                WHERE thread.source = ? AND thread.thread = ? AND task.goal = ?
+                    AND NOT EXISTS (
+                        SELECT 1 FROM events AS earlier
+                        WHERE earlier.source = thread.source AND earlier.thread = thread.thread
+                            AND earlier.routed = 0
+                            AND earlier.seq < (SELECT seq FROM events WHERE id = ?)
+                    )
+            """, (event["source"], event["thread"], policy["goal"], event["id"])).fetchone()
+            if target:
+                self._deliver_external(event, target["id"], "delivered")
+                return None
+        return policy
+
     def watch_directories(self):
         with self.changed:
             rows = self.db.execute("SELECT DISTINCT thread FROM subscriptions ORDER BY thread")
             return [row["thread"] for row in rows]
 
+    def retry(self, task_id):
+        """Queue the existing inputs again after a worker failure."""
+        with self.changed, self.db:
+            if self.stopping:
+                raise RuntimeError("服务已经关闭")
+            task = self.db.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if task is None:
+                raise ValueError("找不到需要重试的任务")
+            if task["status"] != "failed":
+                raise ValueError("只有失败的任务可以重试")
+            pending = self.db.execute(
+                "SELECT 1 FROM deliveries WHERE task_id = ? AND done = 0 LIMIT 1", (task_id,)
+            ).fetchone()
+            if pending is None:
+                raise ValueError("这个任务没有可重试的输入")
+            self.db.execute(
+                "UPDATE tasks SET status = 'queued', question = '', updated = ? WHERE id = ?",
+                (time.time(), task_id),
+            )
+            self.changed.notify_all()
+
     def snapshot(self):
         with self.changed:
-            return {"tasks": self._tasks(), "messages": self._messages()}
+            events = self.db.execute("""
+                SELECT event.id, event.source, event.source_id, event.thread, external.decision, external.task_id
+                FROM external_events AS external JOIN events AS event ON event.id = external.event_id
+                ORDER BY event.seq DESC LIMIT 50
+            """).fetchall()
+            return {"tasks": self._tasks(), "messages": self._messages(),
+                    "events": [dict(row) for row in reversed(events)]}
 
     def _task_exists(self, task_id):
         return self.db.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is not None
@@ -237,15 +391,25 @@ class Orchestrator:
             with self.changed:
                 if self.stopping:
                     return
-                row = self.db.execute("SELECT * FROM events WHERE routed = 0 ORDER BY seq LIMIT 1").fetchone()
+                row = self.db.execute("""
+                    SELECT event.*, external.event_id IS NOT NULL AS is_external, external.allow_auto
+                    FROM events AS event LEFT JOIN external_events AS external ON external.event_id = event.id
+                    WHERE event.routed = 0 ORDER BY event.seq LIMIT 1
+                """).fetchone()
                 if row is None:
                     self.changed.wait()
                     continue
                 event = self._event(row)
-                # Include clarification questions and preceding discussion as routing context.
-                event["recent"] = self._messages(limit=16, before=event["id"])
-                event["reply_context"] = self._reply_context(event["id"])
-                tasks = self._tasks(limit=40)
+                external = bool(row["is_external"])
+                if external:
+                    event["source_id"] = row["source_id"]
+                else:
+                    event["recent"] = self._messages(limit=16, before=event["id"])
+                    event["reply_context"] = self._reply_context(event["id"])
+                    tasks = self._tasks(limit=40)
+            if external:
+                self._route_external(event, bool(row["allow_auto"]))
+                continue
             try:
                 decisions = self.assess(event, tasks)
                 with self.changed, self.db:
@@ -262,6 +426,53 @@ class Orchestrator:
                     self._post("assistant", f"任务分派失败：{error}", source="router")
                     self.db.execute("UPDATE events SET routed = 1 WHERE id = ?", (event["id"],))
                     self.changed.notify_all()
+
+    def _route_external(self, event, allow_auto):
+        with self.changed, self.db:
+            policy = self._prepare_external(event, allow_auto)
+            self.changed.notify_all()
+        if policy is None:
+            return
+
+        mode = policy["mode"] if allow_auto else "observe"
+        candidate = {**event, "policy": {"source": policy["source"], "goal": policy["goal"], "mode": mode}}
+        try:
+            title = self._external_title(self.assess(candidate, []))
+            decision = "observed" if title else "ignored"
+        except Exception:
+            title, decision = None, "failed"
+
+        with self.changed, self.db:
+            if self._policy(event["source"]) != policy:
+                # The event remains pending and will be gated again by the new rule.
+                return
+            if title and mode == "auto":
+                task_id = uuid.uuid4().hex
+                self.db.execute("INSERT INTO tasks (id, title, goal, updated) VALUES (?, ?, ?, ?)",
+                                (task_id, title, policy["goal"], time.time()))
+                self.db.execute("""
+                    INSERT INTO external_threads (source, thread, task_id) VALUES (?, ?, ?)
+                    ON CONFLICT(source, thread) DO UPDATE SET task_id = excluded.task_id
+                """, (event["source"], event["thread"], task_id))
+                self._deliver_external(event, task_id, "accepted")
+            else:
+                self._finish_external(event["id"], decision)
+            self.changed.notify_all()
+
+    def _external_title(self, decisions):
+        if not isinstance(decisions, list) or not decisions:
+            raise ValueError("Router 需要返回至少一项决定")
+        title = None
+        for decision in decisions:
+            if not isinstance(decision, dict):
+                raise ValueError("Router 返回的决定格式无效")
+            action = decision.get("action")
+            if action == "new":
+                accepted_title = self._nonempty(decision, "title")
+                title = title or accepted_title
+            elif action not in ("ignore", "ask"):
+                raise ValueError("外部事件不能由模型关联至其他任务")
+        return title
 
     def _apply_decisions(self, event, decisions):
         if not isinstance(decisions, list) or not decisions:
