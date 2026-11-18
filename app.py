@@ -15,7 +15,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 
 WEB = Path(__file__).resolve().parent / "web"
-STATIC = {"/": "index.html", "/app.css": "app.css", "/app.js": "app.js"}
+STATIC = {"/": "index.html", "/app.css": "app.css", "/app.js": "app.js", "/graph.js": "graph.js"}
 MAX_ATTACHMENTS = 12
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 MAX_REQUEST_BYTES = (MAX_UPLOAD_BYTES * 4 // 3) + 256 * 1024

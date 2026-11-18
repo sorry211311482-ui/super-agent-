@@ -3,33 +3,59 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f5f6f2">
+  <meta name="theme-color" content="#080d18">
   <title>SuperAgent</title>
   <link rel="stylesheet" href="/app.css">
+  <script defer src="/graph.js"></script>
   <script defer src="/app.js"></script>
 </head>
 <body>
   <div class="layout">
     <header class="topbar">
-      <a class="brand" href="/" aria-label="SuperAgent 工作区"><span class="brand-mark" aria-hidden="true">S</span>SuperAgent</a>
+      <a class="brand" href="/" aria-label="SuperAgent 工作区"><span class="brand-mark" aria-hidden="true"></span>SuperAgent</a>
       <nav class="views" aria-label="工作区界面">
         <button type="button" class="view-button" id="workspace-view" aria-pressed="true">工作台</button>
         <button type="button" class="view-button" id="sources-view" aria-pressed="false">来源与事件</button>
       </nav>
       <div class="connection" id="connection" role="status"><span></span>正在连接</div>
     </header>
+    <section class="flow-shell" id="flow-shell" aria-labelledby="flow-heading">
+      <header class="flow-head">
+        <h1 id="flow-heading">实时分发</h1>
+        <div class="flow-controls">
+          <span class="flow-count" id="flow-count">0 运行中</span>
+          <button type="button" class="button secondary flow-replay" id="flow-replay" disabled><span aria-hidden="true">↻</span> 回放最近</button>
+        </div>
+      </header>
+      <div class="flow-stage" id="flow-stage" aria-label="输入、Router、Worker 和交付的连接图">
+        <canvas id="flow-canvas" aria-hidden="true"></canvas>
+        <div class="flow-terminal" id="flow-input">
+          <span class="flow-terminal-icon" aria-hidden="true"><i></i></span>
+          <span class="flow-terminal-name">输入</span>
+        </div>
+        <div class="flow-router" id="flow-router">
+          <span class="router-sigil" aria-hidden="true"><i></i></span>
+          <strong>Router</strong>
+        </div>
+        <div class="flow-workers" id="flow-workers" aria-label="Worker"></div>
+        <div class="flow-terminal" id="flow-output">
+          <span class="flow-terminal-icon" aria-hidden="true"><i></i></span>
+          <span class="flow-terminal-name">交付</span>
+        </div>
+      </div>
+      <footer class="flow-footer">
+        <ul class="flow-legend" aria-label="光点图例">
+          <li class="legend-input">输入</li>
+          <li class="legend-dispatch">派发</li>
+          <li class="legend-output">输出</li>
+        </ul>
+        <p id="flow-caption" class="flow-caption" aria-live="polite">等待事件</p>
+      </footer>
+    </section>
     <main class="conversation" aria-labelledby="chat-heading">
       <header class="panel-head">
-        <h1 id="chat-heading">对话</h1>
+        <h2 id="chat-heading">对话</h2>
       </header>
-      <div class="timeline" aria-live="polite" id="timeline">
-        <div class="empty chat-empty" id="empty-chat">
-          <span class="empty-mark" aria-hidden="true">↗</span>
-          <h2>交给 SuperAgent 一项任务</h2>
-          <p>说明你想要的结果，附上需要的资料。你可以接着交代另一项任务。</p>
-        </div>
-        <ol id="messages" aria-label="消息"></ol>
-      </div>
       <form class="composer" id="composer">
         <div class="reply-banner" id="reply" hidden>
           <span id="reply-heading"></span>
@@ -51,6 +77,13 @@
         </div>
         <p class="form-error" role="alert" id="form-error" hidden></p>
       </form>
+      <div class="timeline" aria-live="polite" id="timeline">
+        <div class="empty chat-empty" id="empty-chat">
+          <h2>交给 SuperAgent 一项任务</h2>
+          <p>说明你想要的结果，附上需要的资料。你可以接着交代另一项任务。</p>
+        </div>
+        <ol id="messages" aria-label="消息"></ol>
+      </div>
     </main>
     <aside class="tasks" aria-labelledby="tasks-heading">
       <header class="panel-head tasks-head">

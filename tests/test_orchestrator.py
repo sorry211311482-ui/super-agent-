@@ -31,6 +31,43 @@ class OrchestratorTest(unittest.TestCase):
         return next((task for task in service.snapshot()["tasks"]
                      if task["title"] == title and task["status"] == status), None)
 
+    def test_flow_tracks_split_dispatch_direct_replies_and_worker_returns(self):
+        def route(event, tasks):
+            return [{"action": "new", "title": title, "goal": title} for title in ("比价", "审核")]
+
+        def execute(job):
+            return {"status": "ready", "summary": job["inputs"][-1]["text"]}
+
+        service = Orchestrator(self.state, route, execute, slots=2)
+        service.start()
+        self.addCleanup(service.close)
+
+        original = service.submit("比价并审核")
+        quote = self.wait_for(lambda: self.task(service, "比价", "ready"))
+        review = self.wait_for(lambda: self.task(service, "审核", "ready"))
+        reply = service.submit("补充运费", reply_to=quote["id"])
+        self.wait_for(lambda: next((task for task in service.snapshot()["tasks"]
+                                   if task["id"] == quote["id"] and task["summary"] == "补充运费"), None))
+        ignored = service.submit_external("quotes", "unconfigured", "quote-1", "无需处理")
+
+        flow = service.snapshot()["flow"]
+        self.assertEqual(flow["slots"], 2)
+        packets = flow["packets"]
+        self.assertEqual(len({packet["id"] for packet in packets}), len(packets))
+        self.assertEqual([(packet["event_id"], packet["via"]) for packet in packets
+                          if packet["kind"] == "input"], [
+            (original, "router"), (reply, "direct"), (ignored, "router"),
+        ])
+        self.assertCountEqual([(packet["event_id"], packet["task_id"], packet["via"])
+                               for packet in packets if packet["kind"] == "dispatch"], [
+            (original, quote["id"], "router"), (original, review["id"], "router"),
+            (reply, quote["id"], "direct"),
+        ])
+        self.assertCountEqual([packet["task_id"] for packet in packets if packet["kind"] == "return"],
+                              [quote["id"], review["id"], quote["id"]])
+        self.assertEqual(next(packet["status"] for packet in packets
+                              if packet["kind"] == "input" and packet["event_id"] == ignored), "ignored")
+
     def test_two_workers_and_directory_wakeup_after_restart(self):
         quote_started = threading.Event()
         finish_quote = threading.Event()

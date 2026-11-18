@@ -14,6 +14,9 @@ class _AmbiguousAttachments(ValueError):
     pass
 
 
+FLOW_HISTORY_PER_KIND = 16
+
+
 class Orchestrator:
     def __init__(self, state_dir, assess, execute, slots=2):
         if slots < 1:
@@ -103,6 +106,8 @@ class Orchestrator:
             CREATE INDEX IF NOT EXISTS pending_events ON events(seq) WHERE routed = 0;
             CREATE INDEX IF NOT EXISTS pending_deliveries ON deliveries(task_id) WHERE done = 0;
             CREATE INDEX IF NOT EXISTS subscriptions_by_thread ON subscriptions(thread);
+            CREATE INDEX IF NOT EXISTS worker_returns ON messages(seq)
+                WHERE role = 'assistant' AND source = 'worker' AND task_id IS NOT NULL;
         """)
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
@@ -327,7 +332,63 @@ class Orchestrator:
                 ORDER BY event.seq DESC LIMIT 50
             """).fetchall()
             return {"tasks": self._tasks(), "messages": self._messages(),
-                    "events": [dict(row) for row in reversed(events)]}
+                    "events": [dict(row) for row in reversed(events)],
+                    "flow": {"slots": self.slots, "packets": self._flow_packets()}}
+
+    @staticmethod
+    def _flow_route(row):
+        if row["reply_to"] or row["source"] == "directory" or row["decision"] == "delivered":
+            return "direct"
+        return "router"
+
+    def _flow_packets(self):
+        """Recent inputs, deliveries, and worker replies in each stream's persisted order."""
+        inputs = self.db.execute("""
+            SELECT event.id, event.source, event.reply_to, event.routed, external.decision,
+                COALESCE(external.task_id, message.task_id) AS task_id
+            FROM events AS event
+            LEFT JOIN external_events AS external ON external.event_id = event.id
+            LEFT JOIN messages AS message ON message.id = event.id
+            ORDER BY event.seq DESC LIMIT ?
+        """, (FLOW_HISTORY_PER_KIND,)).fetchall()
+        deliveries = self.db.execute("""
+            SELECT delivery.event_id, delivery.task_id, task.title,
+                event.source, event.reply_to, external.decision
+            FROM deliveries AS delivery
+            JOIN events AS event ON event.id = delivery.event_id
+            JOIN tasks AS task ON task.id = delivery.task_id
+            LEFT JOIN external_events AS external ON external.event_id = event.id
+            ORDER BY delivery.rowid DESC LIMIT ?
+        """, (FLOW_HISTORY_PER_KIND,)).fetchall()
+        returns = self.db.execute("""
+            SELECT message.id, message.task_id, task.title
+            FROM messages AS message JOIN tasks AS task ON task.id = message.task_id
+            WHERE message.role = 'assistant' AND message.source = 'worker'
+                AND message.task_id IS NOT NULL
+            ORDER BY message.seq DESC LIMIT ?
+        """, (FLOW_HISTORY_PER_KIND,)).fetchall()
+
+        packets = []
+        source_labels = {"chat": "对话输入", "directory": "目录更新"}
+        for row in reversed(inputs):
+            label = source_labels.get(row["source"], row["source"] if row["decision"] else "来源事件")
+            packets.append({
+                "id": f"input:{row['id']}", "kind": "input", "event_id": row["id"],
+                "task_id": row["task_id"], "via": self._flow_route(row), "label": label,
+                "status": row["decision"] or ("routed" if row["routed"] else "pending"),
+            })
+        for row in reversed(deliveries):
+            packets.append({
+                "id": f"dispatch:{row['event_id']}:{row['task_id']}", "kind": "dispatch",
+                "event_id": row["event_id"], "task_id": row["task_id"],
+                "via": self._flow_route(row), "label": row["title"][:100],
+            })
+        for row in reversed(returns):
+            packets.append({
+                "id": f"return:{row['id']}", "kind": "return",
+                "task_id": row["task_id"], "label": row["title"][:100],
+            })
+        return packets
 
     def _task_exists(self, task_id):
         return self.db.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is not None

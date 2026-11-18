@@ -123,6 +123,8 @@ function renderTasks(tasks) {
   const fragment = document.createDocumentFragment();
   for (const task of tasks) {
     const card = node("article", "task-card");
+    card.id = `task-${task.id}`;
+    card.tabIndex = -1;
     const header = node("div", "task-top");
     const status = labels[task.status] || "处理中";
     header.append(node("h3", "", task.title), node("span", `status ${task.status}`, status));
@@ -234,6 +236,7 @@ async function poll() {
   try {
     const state = await request("/api/state");
     connection(true);
+    window.superagentFlow?.update(state);
     const signature = JSON.stringify([state.tasks, state.messages]);
     if (signature !== previousState) {
       previousState = signature;
@@ -369,6 +372,7 @@ function showSources(show) {
   $("sources-panel").hidden = !show;
   document.querySelector(".conversation").hidden = show;
   document.querySelector(".tasks").hidden = show;
+  $("flow-shell").hidden = show;
   $("workspace-view").setAttribute("aria-pressed", String(!show));
   $("sources-view").setAttribute("aria-pressed", String(show));
   if (show) readPolicies();
@@ -524,6 +528,12 @@ $("text").addEventListener("keydown", (event) => {
   }
 });
 
+document.addEventListener("superagent:select-task", (event) => {
+  const card = $(`task-${event.detail}`);
+  if (!card) return;
+  card.focus({ preventScroll: true });
+  card.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth", block: "nearest" });
+});
 poll();
 readFolders();
 updateModeHint();
