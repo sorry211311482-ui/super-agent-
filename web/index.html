@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f6f2">
+  <title>SuperAgent</title>
+  <link rel="stylesheet" href="/app.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <div class="layout">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="SuperAgent 工作区"><span class="brand-mark" aria-hidden="true">S</span>SuperAgent</a>
+      <div class="connection" id="connection" role="status"><span></span>正在连接</div>
+    </header>
+    <main class="conversation" aria-labelledby="chat-heading">
+      <header class="panel-head">
+        <h1 id="chat-heading">对话</h1>
+      </header>
+      <div class="timeline" aria-live="polite" id="timeline">
+        <div class="empty chat-empty" id="empty-chat">
+          <span class="empty-mark" aria-hidden="true">↗</span>
+          <h2>交给 SuperAgent 一项任务</h2>
+          <p>说明你想要的结果，附上需要的资料。你可以接着交代另一项任务。</p>
+        </div>
+        <ol id="messages" aria-label="消息"></ol>
+      </div>
+      <form class="composer" id="composer">
+        <div class="reply-banner" id="reply" hidden>
+          <span id="reply-heading"></span>
+          <button type="button" id="cancel-reply" class="icon-button" aria-label="取消回复任务">×</button>
+        </div>
+        <label class="sr-only" for="text">任务要求</label>
+        <textarea rows="3" id="text" placeholder="说说你要完成什么…" maxlength="16000" spellcheck="false"></textarea>
+        <div id="selected-files" class="selected-files" hidden></div>
+        <div class="composer-bar">
+          <label class="upload button secondary">
+            <span aria-hidden="true">＋</span> 附件
+            <input type="file" id="files" multiple class="sr-only">
+          </label>
+          <label class="watch-select">
+            <span class="sr-only">订阅目录</span>
+            <select id="watch"><option value="">订阅目录</option></select>
+          </label>
+          <button class="button primary" id="submit" type="submit">发送 <span aria-hidden="true">↑</span></button>
+        </div>
+        <p class="form-error" role="alert" id="form-error" hidden></p>
+      </form>
+    </main>
+    <aside class="tasks" aria-labelledby="tasks-heading">
+      <header class="panel-head tasks-head">
+        <h2 id="tasks-heading">任务</h2>
+        <span id="running-count"></span>
+      </header>
+      <div class="task-list" id="tasks">
+        <div class="empty">
+          <p>任务接单后会显示在这里。</p>
+        </div>
+      </div>
+      <div class="inbox">
+        <div class="inbox-header">
+          <div>
+            <h3>收件目录</h3>
+            <p>新建子目录后，在发送任务时选中它。往里面补放文件，会接回原任务。</p>
+          </div>
+          <button type="button" class="button secondary" id="refresh-folders" aria-label="刷新收件目录" title="刷新收件目录">↻</button>
+        </div>
+        <div class="path-row">
+          <code id="inbox-path">正在读取…</code>
+          <button type="button" class="button text-button" id="copy-inbox" disabled>复制路径</button>
+        </div>
+      </div>
+    </aside>
+  </div>
+</body>
+</html>

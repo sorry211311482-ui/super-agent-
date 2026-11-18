@@ -1,0 +1,5 @@
+.superagent/
+__pycache__/
+inbox/
+.env
+.DS_Store
